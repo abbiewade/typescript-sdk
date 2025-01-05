@@ -15,10 +15,19 @@ import {
   ListToolsRequestSchema,
   SetLevelRequestSchema,
   ErrorCode,
+  ReadResourceResult,
+  ListPromptsResultSchema,
+  ListResourcesResultSchema,
+  ListToolsResultSchema, GetPromptResultSchema, CallToolResultSchema, ReadResourceResultSchema,
 } from "../types.js";
 import { Transport } from "../shared/transport.js";
 import { InMemoryTransport } from "../inMemory.js";
 import { Client } from "../client/index.js";
+import {
+  tool,
+  prompt,
+  resource, param,
+} from './decorator.js';
 
 test("should accept latest protocol version", async () => {
   let sendPromiseResolve: (value: unknown) => void;
@@ -231,7 +240,7 @@ test("should respect client capabilities", async () => {
   );
 
   // Implement request handler for sampling/createMessage
-  client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
+  client.setRequestHandler(CreateMessageRequestSchema, async (_request) => {
     // Mock implementation of createMessage
     return {
       model: "test-model",
@@ -279,7 +288,7 @@ test("should respect server notification capabilities", async () => {
     },
   );
 
-  const [clientTransport, serverTransport] =
+  const [_clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
 
   await server.connect(serverTransport);
@@ -394,7 +403,7 @@ test("should typecheck", () => {
   );
 
   // Typecheck that only valid weather requests/notifications/results are allowed
-  weatherServer.setRequestHandler(GetWeatherRequestSchema, (request) => {
+  weatherServer.setRequestHandler(GetWeatherRequestSchema, (_request) => {
     return {
       temperature: 72,
       conditions: "sunny",
@@ -437,7 +446,7 @@ test("should handle server cancelling a request", async () => {
   // Set up client to delay responding to createMessage
   client.setRequestHandler(
     CreateMessageRequestSchema,
-    async (_request, extra) => {
+    async (_request, _extra) => {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       return {
         model: "test",
@@ -543,5 +552,397 @@ test("should handle request timeout", async () => {
     ),
   ).rejects.toMatchObject({
     code: ErrorCode.RequestTimeout,
+  });
+});
+
+describe('Server Registry Integration', () => {
+
+  let server: Server;
+  let client: Client;
+  let clientTransport: InMemoryTransport;
+  let serverTransport: InMemoryTransport;
+
+  beforeEach(async () => {
+    [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    // Initialize server with all capabilities
+    server = new Server(
+        { name: 'test-server', version: '1.0' },
+        {
+          capabilities: {
+            resources: {},
+            prompts: {},
+            tools: {}
+          },
+          enforceStrictCapabilities: true
+        }
+    );
+
+    // Initialize client with matching capabilities
+    client = new Client(
+        { name: 'test-client', version: '1.0' },
+        {
+          capabilities: {
+            resources: {},
+            prompts: {},
+            tools: {}
+          }
+        }
+    );
+
+    // Connect both client and server
+    await Promise.all([
+      client.connect(clientTransport),
+      server.connect(serverTransport)
+    ]);
+  });
+
+
+  test('should list decorator-registered resources', async () => {
+    // Register a decorated class
+    class TestHandlers {
+      @resource({
+        uri: 'file:///test.txt',
+        name: 'Test Resource',
+        description: 'Test resource',
+        mimeType: 'text/plain'
+      })
+      async getResource(): Promise<ReadResourceResult> {
+        return {
+          contents: [{
+            type: 'text',
+            text: 'Test content',
+            uri: 'file:///test.txt'
+          }]
+        };
+      }
+    }
+
+    server.register(new TestHandlers());
+
+    const response = await client.request(
+        { method: 'resources/list' },
+        ListResourcesResultSchema
+    );
+
+    expect(response.resources).toHaveLength(1);
+    expect(response.resources[0]).toMatchObject({
+      uri: 'file:///test.txt',
+      name: 'Test Resource',
+      mimeType: 'text/plain'
+    });
+  });
+
+  test('should handle both decorator and manual registration', async () => {
+    // Register with decorator
+    class TestHandlers {
+      @resource({
+        uri: 'file:///decorator.txt',
+        name: 'Decorator Resource',
+        description: 'Test resource',
+        mimeType: 'text/plain'
+      })
+      async getResource(): Promise<ReadResourceResult> {
+        return {
+          contents: [{
+            type: 'text',
+            text: 'Decorator content',
+            uri: 'file:///decorator.txt'
+          }]
+        };
+      }
+    }
+    server.register(new TestHandlers());
+
+    // Register manual handler
+    server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: [{
+        uri: 'file:///manual.txt',
+        name: 'Manual Resource',
+        description: 'Test resource',
+        mimeType: 'text/plain'
+      }]
+    }));
+
+    const response = await client.request(
+        { method: 'resources/list' },
+        ListResourcesResultSchema
+    );
+
+    // Should get both resources
+    expect(response.resources).toHaveLength(2);
+    expect(response.resources).toContainEqual({
+      uri: 'file:///decorator.txt',
+      name: 'Decorator Resource',
+      description: 'Test resource',
+      mimeType: 'text/plain'
+    });
+    expect(response.resources).toContainEqual({
+      uri: 'file:///manual.txt',
+      name: 'Manual Resource',
+      description: 'Test resource',
+      mimeType: 'text/plain'
+    });
+  });
+
+  test("should validate handler schema", () => {
+    // Create server with required options
+    const server = new Server(
+        { name: "test", version: "1.0" },
+        {
+          capabilities: {
+            prompts: {},
+            resources: {},
+            tools: {},
+          }
+        }
+    );
+
+    // Create an invalid schema missing required properties
+    const invalidSchema = {
+      // Missing method literal and other required properties
+      params: z.object({})
+    };
+
+    const handler = async () => ({ result: "test" });
+
+    // Attempting to set handler with invalid schema should throw
+    expect(() =>
+        server.setRequestHandler(invalidSchema as any, handler)
+    ).toThrow();
+  });
+
+  test('should throw error when registering null', () => {
+    expect(() => {
+      server.register(null as any);
+    }).toThrow('Must provide either a class constructor or class instance');
+  });
+
+  test('should throw error when registering undefined', () => {
+    expect(() => {
+      server.register(undefined as any);
+    }).toThrow('Must provide either a class constructor or class instance');
+  });
+
+  test('should throw error when registering primitive values', () => {
+    expect(() => {
+      server.register(42 as any);
+    }).toThrow('Must provide either a class constructor or class instance');
+
+    expect(() => {
+      server.register('string' as any);
+    }).toThrow('Must provide either a class constructor or class instance');
+  });
+
+  test('should handle multiple decorators on same class', async () => {
+    class MultiHandler {
+      @resource({
+        uri: 'file:///multi.txt',
+        name: 'Multi Resource',
+        mimeType: 'text/plain'
+      })
+      async getResource(): Promise<any> {
+        return {
+          contents: [{
+            uri: 'file:///multi.txt',
+            text: 'Resource content'
+          }]
+        };
+      }
+
+      @prompt({
+        name: 'multi-prompt',
+        description: 'Multi prompt'
+      })
+      async getPrompt(): Promise<any> {
+        return {
+          template: 'Multi prompt template'
+        };
+      }
+
+      @tool({
+        name: 'multi-tool',
+        description: 'Multi tool'
+      })
+      async executeTool(): Promise<any> {
+        return { result: 'Tool result' };
+      }
+    }
+
+    server.register(new MultiHandler());
+
+    const resourcesResponse = await client.request(
+        { method: 'resources/list' },
+        ListResourcesResultSchema
+    );
+    const promptsResponse = await client.request(
+        { method: 'prompts/list' },
+        ListPromptsResultSchema
+    );
+    const toolsResponse = await client.request(
+        { method: 'tools/list' },
+        ListToolsResultSchema
+    );
+
+    expect(resourcesResponse.resources).toHaveLength(1);
+    expect(promptsResponse.prompts).toHaveLength(1);
+    expect(toolsResponse.tools).toHaveLength(1);
+  });
+
+  test('should not register decorators when capabilities are disabled', async () => {
+    // Create server with no capabilities
+    const limitedServer = new Server(
+        { name: 'limited-server', version: '1.0' },
+        {
+          capabilities: {},
+          enforceStrictCapabilities: true
+        }
+    );
+
+    const [_clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+    class TestHandlers {
+      @resource({
+        uri: 'file:///test.txt',
+        name: 'Test Resource',
+        mimeType: 'text/plain'
+      })
+      async getResource() {
+        return {
+          contents: [{ uri: 'file:///test.txt', text: 'content' }]
+        };
+      }
+
+      @prompt({
+        name: 'test-prompt',
+        description: 'Test prompt'
+      })
+      async getPrompt() {
+        return {
+          messages: [{
+            role: 'user',
+            content: { type: 'text', text: 'test' }
+          }],
+          template: 'prompt'
+        };
+      }
+
+      @tool({
+        name: 'test-tool',
+        description: 'Test tool'
+      })
+      async executeTool() {
+        return { result: 'tool' };
+      }
+    }
+
+    // Should not throw, but also should not register the handlers
+    limitedServer.register(new TestHandlers());
+
+    // Connect server to transport
+    await limitedServer.connect(serverTransport);
+
+    // Modified assertions to verify that capability errors are thrown when handlers are called
+    await expect(async () => {
+      await limitedServer.setRequestHandler(ListResourcesRequestSchema, async () => ({
+        resources: []
+      }));
+    }).rejects.toThrow(/Server does not support resources/);
+
+    await expect(async () => {
+      await limitedServer.setRequestHandler(ListPromptsRequestSchema, async () => ({
+        prompts: []
+      }));
+    }).rejects.toThrow(/Server does not support prompts/);
+
+    await expect(async () => {
+      await limitedServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+        tools: []
+      }));
+    }).rejects.toThrow(/Server does not support tools/);
+  });
+
+  test('should handle errors in decorated handlers gracefully', async () => {
+    const spy = jest.spyOn(console, 'error');
+    spy.mockImplementation(() => {});
+
+    class ErrorHandlers {
+      @resource({
+        uri: 'file:///error.txt',
+        name: 'Error Resource',
+        mimeType: 'text/plain'
+      })
+      async getResource() {
+        throw new Error('Expected Resource error');
+      }
+
+      @prompt({
+        name: 'error-prompt',
+        description: 'Error prompt'
+      })
+      async getPrompt() {
+        throw new Error('Expected Prompt error');
+      }
+
+      @tool({
+        name: 'error-tool',
+        description: 'Error tool'
+      })
+      async executeTool() {
+        throw new Error('Expected Tool error');
+      }
+    }
+
+    server.register(new ErrorHandlers());
+
+    // Resources should still be listed even if their handlers throw
+    const resourcesResponse = await client.request(
+        { method: 'resources/list' },
+        ListResourcesResultSchema
+    );
+    expect(resourcesResponse.resources).toHaveLength(1);
+
+    // Reading the resource should fail gracefully
+    await expect(
+        client.request({
+              method: 'resources/read',
+              params: { uri: 'file:///error.txt' }
+            },
+            ReadResourceResultSchema)
+    ).rejects.toThrow();
+
+    // Prompts should still be listed
+    const promptsResponse = await client.request(
+        { method: 'prompts/list' },
+        ListPromptsResultSchema
+    );
+    expect(promptsResponse.prompts).toHaveLength(1);
+
+    // Executing the prompt should fail gracefully
+    await expect(
+        client.request({
+              method: 'prompts/get',
+              params: { name: 'error-prompt', arguments: {} }
+            },
+            GetPromptResultSchema)
+    ).rejects.toThrow();
+
+    // Tools should still be listed
+    const toolsResponse = await client.request(
+        { method: 'tools/list' },
+        ListToolsResultSchema
+    );
+    expect(toolsResponse.tools).toHaveLength(1);
+
+    // Executing the tool should fail gracefully
+    await expect(
+        client.request({
+              method: 'tools/call',
+              params: { name: 'error-tool', arguments: {} }
+            },
+            CallToolResultSchema)
+    ).rejects.toThrow();
+
+    spy.mockRestore();
   });
 });

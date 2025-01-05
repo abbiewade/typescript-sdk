@@ -62,6 +62,10 @@ const resourceContent = await client.request(
 
 ### Creating a Server
 
+You can create servers using any combination of the following approaches:
+
+#### Callback API
+
 ```typescript
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -105,6 +109,55 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     throw new Error("Resource not found");
   }
 });
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
+```
+
+#### Decorators API
+
+```typescript
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { resource, tool, param } from "@modelcontextprotocol/sdk/server/decorator.js";
+import { z } from "zod";
+
+const server = new Server({
+  name: "example-server",
+  version: "1.0.0",
+}, {
+  capabilities: {
+    resources: {},
+    tools: {}
+  }
+});
+
+class ExampleClass {
+  @resource({
+    uri: "file:///example.txt",
+    name: "Example Resource",
+    mimeType: "text/plain"
+  })
+  async getResource() {
+    return {
+      contents: [{
+        uri: "file:///example.txt",
+        text: "This is the content of the example resource."
+      }]
+    };
+  }
+
+  @tool({ description: "Example tool" })
+  async exampleTool(
+    @param(z.string().min(1)) input: string
+  ) {
+    return {
+      content: [{ type: "text", text: `Processed: ${input}` }]
+    };
+  }
+}
+
+server.register(new ExampleClass());
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

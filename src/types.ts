@@ -1238,3 +1238,54 @@ export type ClientResult = z.infer<typeof ClientResultSchema>;
 export type ServerRequest = z.infer<typeof ServerRequestSchema>;
 export type ServerNotification = z.infer<typeof ServerNotificationSchema>;
 export type ServerResult = z.infer<typeof ServerResultSchema>;
+
+/* Decorator Metadata */
+export const HandlerMetadataSchema = z.object({
+  type: z.enum(['resource', 'prompt', 'tool']),
+  metadata: z.union([
+    z.object({ // Resource
+      uri: z.string().url(),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      mimeType: z.string()
+    }),
+    z.object({ // Prompt
+      name: z.string(),
+      description: z.string().optional(),
+      arguments: z.array(z.object({
+        name: z.string(),
+        description: z.string().optional(),
+        required: z.boolean(),
+        type: z.enum(['string', 'number', 'boolean', 'object', 'array'])
+      })).optional()
+    }),
+    z.object({ // Tool
+      name: z.string(),
+      description: z.string().optional(),
+      inputSchema: z.object({
+        type: z.literal('object'),
+        properties: z.record(z.any()),
+        required: z.array(z.string()).optional()
+      })
+    })
+  ]),
+  parameters: z.map(
+    z.number(),
+    z.object({
+      name: z.string(),
+      schema: z.instanceof(z.ZodType),
+      required: z.boolean()
+    })
+  )
+});
+export type HandlerMetadata = z.infer<typeof HandlerMetadataSchema>;
+
+export const ParameterMetadataSchema = z.object({
+  name: z.string(),
+  type: z.enum(['string', 'number', 'boolean', 'object', 'array']),
+  required: z.boolean(),
+  default: z.any().optional(),
+  description: z.string().optional(),
+  schema: z.instanceof(z.ZodType).optional()
+});
+export type ParameterMetadata = z.infer<typeof ParameterMetadataSchema>;
